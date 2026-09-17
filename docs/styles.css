@@ -55,16 +55,19 @@ iframe {
 }
 
 .brand-mark {
-  display: grid;
-  width: 38px;
+  display: flex;
+  width: 54px;
   height: 38px;
-  place-items: center;
-  border-radius: 10px;
-  background: #1d1d1f;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: .04em;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.brand-mark img {
+  width: 58px;
+  height: 58px;
+  max-width: none;
+  object-fit: contain;
 }
 
 .fallback {
