@@ -53,6 +53,38 @@ function updateRepairOrder(data) {
   return getRepairOrder(id);
 }
 
+function deleteRepairOrder(repairId) {
+  var id = required_(repairId, 'Repair ID');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var repair = findRecord_('RepairOrders', 'RepairID', id);
+    if (!repair) throw new Error('Repair order not found.');
+
+    // Remove dependent workshop history first so no orphan logs or parts remain.
+    deleteRowsByField_('RepairLogs', 'RepairID', id);
+    deleteRowsByField_('Parts', 'RepairID', id);
+    getSpreadsheet_().getSheetByName('RepairOrders').deleteRow(repair._row);
+    SpreadsheetApp.flush();
+
+    return { ok: true, RepairID: id, JobNumber: repair.JobNumber || id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteRowsByField_(sheetName, field, value) {
+  var rows = readSheet_(sheetName).filter(function(row) {
+    return String(row[field]) === String(value);
+  }).map(function(row) {
+    return row._row;
+  }).sort(function(a, b) {
+    return b - a;
+  });
+  var sheet = getSpreadsheet_().getSheetByName(sheetName);
+  rows.forEach(function(rowNumber) { sheet.deleteRow(rowNumber); });
+}
+
 function getRepairOrder(repairId) {
   var repair = findRecord_('RepairOrders', 'RepairID', required_(repairId, 'Repair ID'));
   if (!repair) throw new Error('Repair order not found.');

@@ -92,4 +92,4 @@ The repository publishes the `docs/` directory with GitHub Pages. Its full-scree
 
 ## Data integrity notes
 
-Repair orders and logs are never hard-deleted. Repair logs are append-only, and every meaningful status change adds a timeline record. IDs are generated while holding an Apps Script lock so concurrent submissions cannot receive the same identifier. Server-side functions validate required fields and relationships before writing data.
+Repair logs remain append-only during the lifetime of a repair, and every meaningful status change adds a timeline record. A repair can be permanently deleted from its detail view after an explicit browser confirmation; that operation also removes the repair's logs and parts while preserving the customer and motorcycle records. IDs are generated while holding an Apps Script lock so concurrent submissions cannot receive the same identifier. Server-side functions validate required fields and relationships before writing data.
