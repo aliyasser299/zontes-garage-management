@@ -1,0 +1,219 @@
+<script>
+(function () {
+  'use strict';
+
+  var state = { dashboard:null, repairs:[], customers:[], motorcycles:[], statuses:[], priorities:[], currentRepair:null, wizard:null, searchTimer:null };
+  var $ = function (selector, root) { return (root || document).querySelector(selector); };
+  var $$ = function (selector, root) { return Array.prototype.slice.call((root || document).querySelectorAll(selector)); };
+
+  function api(method) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function(resolve, reject) {
+      if (!window.google || !google.script || !google.script.run) {
+        reject(new Error('This application must be opened from its deployed Google Apps Script web app URL.'));
+        return;
+      }
+      var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(function(error) {
+        var message = error && error.message ? error.message : String(error || 'Something went wrong.');
+        reject(new Error(message.replace(/^Exception:\s*/, '')));
+      });
+      runner[method].apply(runner, args);
+    });
+  }
+
+  function esc(value) {
+    return String(value === null || value === undefined ? '' : value).replace(/[&<>'"]/g, function(char) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char];
+    });
+  }
+
+  function fmtDate(value, withTime) {
+    if (!value) return '—';
+    var date = new Date(value);
+    if (isNaN(date.getTime())) return esc(value);
+    return new Intl.DateTimeFormat(undefined, withTime ? {day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'} : {day:'numeric',month:'short',year:'numeric'}).format(date);
+  }
+
+  function money(value) {
+    if (value === '' || value === null || value === undefined) return '—';
+    return new Intl.NumberFormat(undefined, {minimumFractionDigits:0,maximumFractionDigits:2}).format(Number(value));
+  }
+
+  function statusClass(status) {
+    var value = String(status || '').toLowerCase();
+    if (value.indexOf('waiting') !== -1) return 'waiting';
+    if (value.indexOf('progress') !== -1) return 'progress';
+    if (value.indexOf('ready') !== -1) return 'ready';
+    if (value.indexOf('delivered') !== -1) return 'delivered';
+    if (value.indexOf('approved') !== -1) return 'approved';
+    if (value.indexOf('cancel') !== -1) return 'cancelled';
+    return '';
+  }
+
+  function statusBadge(value) { return '<span class="status ' + statusClass(value) + '">' + esc(value) + '</span>'; }
+  function emptyState(title, text) { return '<div class="empty"><span class="empty-mark">○</span><strong>' + esc(title) + '</strong><span>' + esc(text) + '</span></div>'; }
+  function setLoading(show, text) { $('#appLoading').classList.toggle('hidden', !show); if (text) $('#appLoading span:last-child').textContent = text; }
+  function toast(message, type) { var item=document.createElement('div'); item.className='toast '+(type||''); item.textContent=message; $('#toastRegion').appendChild(item); setTimeout(function(){item.remove();},4200); }
+  function handleError(error) { console.error(error); toast(error.message || 'Something went wrong. Please try again.', 'error'); }
+  function debounce(fn, delay) { var timer; return function(){ var args=arguments; clearTimeout(timer); timer=setTimeout(function(){fn.apply(null,args);},delay); }; }
+
+  function init() {
+    bindShell();
+    if (!window.google || !google.script || !google.script.run) {
+      state.dashboard={metrics:{active:0,inProgress:0,waitingApproval:0,waitingParts:0,readyPickup:0,completedMonth:0},recent:[],attention:[]};
+      state.statuses=['Received','Initial Inspection','Diagnosis','Waiting for Customer Approval','Approved','Repair in Progress','Waiting for Parts','Quality Check','Ready for Pickup','Delivered','Cancelled'];
+      state.priorities=['Normal','High','Urgent'];
+      populateFilters(); renderAll(); setLoading(false);
+      toast('Local preview mode. Live data connects from the deployed Apps Script URL.');
+      return;
+    }
+    api('getBootstrapData').then(function(data) {
+      state.dashboard=data.dashboard; state.repairs=data.repairs; state.customers=data.customers; state.motorcycles=data.motorcycles; state.statuses=data.statuses; state.priorities=data.priorities;
+      populateFilters(); renderAll(); setLoading(false);
+    }).catch(function(error) { setLoading(false); handleError(error); $('#metricGrid').innerHTML=emptyState('Unable to load garage data', error.message); });
+  }
+
+  function bindShell() {
+    document.addEventListener('click', function(event) {
+      var nav=event.target.closest('[data-nav]'); if(nav){ navigate(nav.dataset.nav); }
+      if(event.target.closest('[data-new-repair]')) openWizard();
+      if(event.target.closest('[data-close-modal]')) closeModal();
+      var repair=event.target.closest('[data-repair-id]'); if(repair) openRepair(repair.dataset.repairId);
+      var customer=event.target.closest('[data-customer-id]'); if(customer && !customer.closest('#repairWizard')) openCustomer(customer.dataset.customerId);
+      var moto=event.target.closest('[data-motorcycle-id]'); if(moto && !moto.closest('#repairWizard')) openMotorcycle(moto.dataset.motorcycleId);
+    });
+    $('#menuToggle').addEventListener('click', function(){ $('.main-nav').classList.toggle('open'); });
+    $('#searchToggle').addEventListener('click', openGlobalSearch); $('#searchClose').addEventListener('click', closeGlobalSearch);
+    $('#globalSearchInput').addEventListener('input', debounce(runGlobalSearch, 280));
+    $('#repairSearch').addEventListener('input', debounce(renderRepairs, 180));
+    ['statusFilter','specialistFilter','priorityFilter','dateFilter'].forEach(function(id){ $('#'+id).addEventListener('change',renderRepairs); });
+    $('#clearFilters').addEventListener('click', function(){ ['repairSearch','statusFilter','specialistFilter','priorityFilter','dateFilter'].forEach(function(id){$('#'+id).value='';}); renderRepairs(); });
+    $('#customerSearch').addEventListener('input', debounce(renderCustomers,180)); $('#motorcycleSearch').addEventListener('input',debounce(renderMotorcycles,180));
+    $('#newCustomerBtn').addEventListener('click', openCustomerForm); $('#customerForm').addEventListener('submit', submitCustomerForm);
+    $('#wizardBack').addEventListener('click', wizardBack); $('#wizardNext').addEventListener('click', wizardNext);
+    $('#updateForm').addEventListener('submit', submitUpdate);
+    $('#modalBackdrop').addEventListener('click', function(e){ if(e.target===this) closeModal(); });
+    document.addEventListener('keydown', function(e){ if(e.key==='Escape'){ if(!$('#globalSearch').classList.contains('hidden')) closeGlobalSearch(); else closeModal(); } });
+  }
+
+  function navigate(page) {
+    $$('.page').forEach(function(p){p.classList.toggle('active',p.id==='page-'+page);});
+    $$('.nav-link').forEach(function(link){link.classList.toggle('active',link.dataset.nav===page);});
+    $('.main-nav').classList.remove('open'); window.scrollTo(0,0);
+  }
+
+  function populateFilters() {
+    $('#statusFilter').innerHTML='<option value="">All statuses</option>'+state.statuses.map(function(s){return '<option>'+esc(s)+'</option>';}).join('');
+    $('#updateForm [name=Stage]').innerHTML=state.statuses.map(function(s){return '<option>'+esc(s)+'</option>';}).join('');
+    var specialists=state.repairs.map(function(r){return r.AssignedSpecialist;}).filter(Boolean).filter(function(v,i,a){return a.indexOf(v)===i;}).sort();
+    $('#specialistFilter').innerHTML='<option value="">All specialists</option>'+specialists.map(function(s){return '<option>'+esc(s)+'</option>';}).join('');
+  }
+
+  function renderAll() { renderDashboard(); renderRepairs(); renderCustomers(); renderMotorcycles(); }
+  function renderDashboard() {
+    var m=state.dashboard.metrics;
+    var metrics=[['Active Repairs',m.active,''],['Repair in Progress',m.inProgress,''],['Waiting for Approval',m.waitingApproval,'attention'],['Waiting for Parts',m.waitingParts,'attention'],['Ready for Pickup',m.readyPickup,''],['Completed This Month',m.completedMonth,'']];
+    $('#metricGrid').innerHTML=metrics.map(function(item){return '<article class="metric '+item[2]+'"><span>'+esc(item[0])+'</span><strong>'+item[1]+'</strong></article>';}).join('');
+    $('#recentRepairs').innerHTML=repairTable(state.dashboard.recent,true);
+    $('#attentionList').innerHTML=state.dashboard.attention.length?state.dashboard.attention.map(function(r){return '<article class="attention-item"><button data-repair-id="'+esc(r.RepairID)+'"><strong>'+esc(r.JobNumber)+' · '+esc(r.CustomerName)+'</strong><span>'+esc(r.MotorcycleModel)+' · '+esc(r.PlateNumber||'No plate')+'</span><span class="attention-reason">'+esc(r.AttentionReason)+'</span></button></article>';}).join(''):emptyState('All clear','No repairs currently need special attention.');
+  }
+
+  function repairTable(repairs, compact) {
+    if(!repairs.length) return emptyState('No repairs found','Try a different search or create a new repair.');
+    return '<div class="data-table-wrap"><table class="data-table"><thead><tr><th>Job Number</th><th>Customer</th><th>Motorcycle</th><th>Plate</th><th>Specialist</th><th>Status</th><th>'+ (compact?'Updated':'Priority') +'</th><th>Action</th></tr></thead><tbody>'+repairs.map(function(r){return '<tr><td class="primary-cell">'+esc(r.JobNumber)+'</td><td>'+esc(r.CustomerName)+'<span class="secondary-line">'+esc(r.CustomerPhone)+'</span></td><td>'+esc(r.MotorcycleModel)+'</td><td>'+esc(r.PlateNumber||'—')+'</td><td>'+esc(r.AssignedSpecialist)+'</td><td>'+statusBadge(r.Status)+'</td><td>'+(compact?fmtDate(r.UpdatedAt,true):'<span class="priority '+esc(r.Priority)+'">'+esc(r.Priority)+'</span>')+'</td><td><button class="link-cell" data-repair-id="'+esc(r.RepairID)+'">Open</button></td></tr>';}).join('')+'</tbody></table></div>';
+  }
+
+  function renderRepairs() {
+    var q=($('#repairSearch').value||'').toLowerCase(),status=$('#statusFilter').value,specialist=$('#specialistFilter').value,priority=$('#priorityFilter').value,date=$('#dateFilter').value;
+    var list=state.repairs.filter(function(r){
+      var matches=!q||[r.JobNumber,r.CustomerName,r.CustomerPhone,r.MotorcycleModel,r.PlateNumber,r.VIN].some(function(v){return String(v||'').toLowerCase().indexOf(q)!==-1;});
+      return matches&&(!status||r.Status===status)&&(!specialist||r.AssignedSpecialist===specialist)&&(!priority||r.Priority===priority)&&(!date||String(r.CheckInDate).slice(0,10)===date);
+    }); $('#repairsTable').innerHTML=repairTable(list,false);
+  }
+
+  function renderCustomers() {
+    var q=($('#customerSearch').value||'').toLowerCase(); var list=state.customers.filter(function(c){return !q||[c.FullName,c.PrimaryPhone,c.SecondaryPhone,c.Email].some(function(v){return String(v||'').toLowerCase().indexOf(q)!==-1;});});
+    if(!list.length){$('#customersTable').innerHTML=emptyState('No customers found','Try a different name, phone, or email.');return;}
+    $('#customersTable').innerHTML='<div class="data-table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Phone</th><th>Motorcycles</th><th>Repairs</th><th>Last Visit</th><th>Action</th></tr></thead><tbody>'+list.map(function(c){return '<tr><td class="primary-cell">'+esc(c.FullName)+'<span class="secondary-line">'+esc(c.Email||c.CustomerID)+'</span></td><td>'+esc(c.PrimaryPhone)+'</td><td>'+esc(c.MotorcycleCount)+'</td><td>'+esc(c.RepairCount)+'</td><td>'+fmtDate(c.LastVisit)+'</td><td><button class="link-cell" data-customer-id="'+esc(c.CustomerID)+'">View</button></td></tr>';}).join('')+'</tbody></table></div>';
+  }
+
+  function renderMotorcycles() {
+    var q=($('#motorcycleSearch').value||'').toLowerCase(); var list=state.motorcycles.filter(function(m){return !q||[m.Model,m.PlateNumber,m.VIN,m.OwnerName,m.OwnerPhone].some(function(v){return String(v||'').toLowerCase().indexOf(q)!==-1;});});
+    if(!list.length){$('#motorcyclesTable').innerHTML=emptyState('No motorcycles found','Try a model, plate, VIN, or owner name.');return;}
+    $('#motorcyclesTable').innerHTML='<div class="data-table-wrap"><table class="data-table"><thead><tr><th>Motorcycle</th><th>Owner</th><th>Plate</th><th>VIN</th><th>Mileage</th><th>Action</th></tr></thead><tbody>'+list.map(function(m){return '<tr><td class="primary-cell">'+esc(m.Model)+'<span class="secondary-line">'+esc(m.ModelYear||m.MotorcycleID)+'</span></td><td>'+esc(m.OwnerName)+'</td><td>'+esc(m.PlateNumber||'—')+'</td><td>'+esc(m.VIN||'—')+'</td><td>'+esc(m.Mileage===''?'—':money(m.Mileage)+' km')+'</td><td><button class="link-cell" data-motorcycle-id="'+esc(m.MotorcycleID)+'">View</button></td></tr>';}).join('')+'</tbody></table></div>';
+  }
+
+  function showModal(id) { $('#modalBackdrop').classList.remove('hidden'); $('#modalBackdrop').setAttribute('aria-hidden','false'); $$('.modal').forEach(function(m){m.classList.toggle('hidden',m.id!==id);}); document.body.style.overflow='hidden'; }
+  function closeModal() { $('#modalBackdrop').classList.add('hidden'); $('#modalBackdrop').setAttribute('aria-hidden','true'); $$('.modal').forEach(function(m){m.classList.add('hidden');}); document.body.style.overflow=''; }
+  function loadingBlock() { return '<div class="inline-loading"><span class="spinner"></span></div>'; }
+
+  function openRepair(id) {
+    showModal('repairModal'); $('#repairDetail').innerHTML=loadingBlock();
+    api('getRepairOrder',id).then(function(repair){state.currentRepair=repair;renderRepairDetail(repair);}).catch(handleError);
+  }
+
+  function renderRepairDetail(r) {
+    var logs=r.Logs||[],parts=r.Parts||[];
+    $('#repairDetail').innerHTML='<div class="detail-top"><div><p class="eyebrow">REPAIR ORDER</p><h2 id="repairModalTitle">'+esc(r.JobNumber)+'</h2>'+statusBadge(r.Status)+'</div><div class="detail-actions"><button id="addUpdateBtn" class="button primary">+ Add Update</button></div></div><div class="detail-layout"><div><section class="detail-section"><h3>Service overview</h3><div class="info-grid"><div class="info-item"><span>Customer</span><strong>'+esc(r.Customer&&r.Customer.FullName)+'</strong></div><div class="info-item"><span>Phone</span><strong>'+esc(r.Customer&&r.Customer.PrimaryPhone)+'</strong></div><div class="info-item"><span>Motorcycle</span><strong>'+esc(r.Motorcycle&&r.Motorcycle.Model)+'</strong></div><div class="info-item"><span>Plate / VIN</span><strong>'+esc((r.Motorcycle&&r.Motorcycle.PlateNumber)||'—')+' · '+esc((r.Motorcycle&&r.Motorcycle.VIN)||'—')+'</strong></div><div class="info-item"><span>Assigned specialist</span><strong>'+esc(r.AssignedSpecialist)+'</strong></div><div class="info-item"><span>Priority</span><strong>'+esc(r.Priority)+'</strong></div></div></section><section class="detail-section"><h3>Customer complaint</h3><div class="prose">'+esc(r.CustomerComplaint||'No complaint recorded.')+'</div></section><section class="detail-section"><h3>Inspection & diagnosis</h3><div class="prose">'+esc(r.InitialInspection||'No initial findings recorded.')+'</div>'+(r.Diagnosis?'<div class="prose" style="margin-top:12px"><strong>Diagnosis</strong><br>'+esc(r.Diagnosis)+'</div>':'')+'</section><section class="detail-section"><h3>Repair timeline</h3>'+(logs.length?'<div class="timeline">'+logs.map(function(l){return '<article class="timeline-item"><span class="timeline-dot"></span><h4>'+esc(l.Stage)+'</h4><div class="timeline-meta">'+fmtDate(l.Timestamp,true)+' · '+esc(l.Specialist||'Garage team')+'</div>'+(l.WorkPerformed?'<p class="timeline-copy"><strong>'+esc(l.WorkPerformed)+'</strong></p>':'')+(l.Finding?'<p class="timeline-copy">Finding: '+esc(l.Finding)+'</p>':'')+(l.Notes?'<p class="timeline-copy">'+esc(l.Notes)+'</p>':'')+'</article>';}).join('')+'</div>':emptyState('No updates yet','Add the first workshop update.'))+'</section></div><aside><section class="detail-section"><h3>Financial information</h3><div class="info-grid"><div class="info-item"><span>Estimated</span><strong>'+money(r.EstimatedCost)+'</strong></div><div class="info-item"><span>Approved</span><strong>'+money(r.ApprovedCost)+'</strong></div><div class="info-item"><span>Final</span><strong>'+money(r.FinalCost)+'</strong></div><div class="info-item"><span>Approval</span><strong>'+esc(r.CustomerApproval||'Pending')+'</strong></div></div></section><section class="detail-section"><h3>Schedule</h3><div class="info-grid"><div class="info-item"><span>Check-in</span><strong>'+fmtDate(r.CheckInDate,true)+'</strong></div><div class="info-item"><span>Estimated completion</span><strong>'+fmtDate(r.EstimatedCompletion,true)+'</strong></div></div></section><section class="detail-section"><h3>Repair notes</h3><div class="prose">'+esc(r.InternalNotes||'No internal notes.')+'</div></section><section class="detail-section"><h3>Parts</h3><div class="parts-list">'+(parts.length?parts.map(function(p){return '<div class="part-row"><span>'+esc(p.PartName)+' × '+esc(p.Quantity)+'</span><strong>'+money(p.TotalPrice)+'</strong></div>';}).join(''):'<span class="secondary-line">No parts recorded.</span>')+'</div></section></aside></div>';
+    $('#addUpdateBtn').addEventListener('click', openUpdate);
+  }
+
+  function openUpdate() {
+    var r=state.currentRepair; var form=$('#updateForm'); form.reset(); form.Stage.value=r.Status; form.Specialist.value=r.AssignedSpecialist||''; showModal('updateModal');
+  }
+
+  function submitUpdate(event) {
+    event.preventDefault(); var form=event.currentTarget; if(!form.reportValidity())return; var button=form.querySelector('[type=submit]'); button.disabled=true; button.textContent='Saving…';
+    var d=Object.fromEntries(new FormData(form).entries()); var payload={RepairID:state.currentRepair.RepairID,Stage:d.Stage,WorkPerformed:d.WorkPerformed,Finding:d.Finding,LaborHours:d.LaborHours,Specialist:d.Specialist,Notes:d.Notes,NextAction:d.NextAction};
+    if(d.PartName) payload.Parts=[{PartName:d.PartName,PartNumber:d.PartNumber,Quantity:d.PartQuantity||1,UnitPrice:d.PartUnitPrice||0}];
+    api('addRepairLog',payload).then(function(result){state.currentRepair=result.repair;toast('Repair update saved.','success');return refreshData();}).then(function(){showModal('repairModal');renderRepairDetail(state.currentRepair);}).catch(handleError).finally(function(){button.disabled=false;button.textContent='Save Update';});
+  }
+
+  function openCustomer(id) { showModal('entityModal');$('#entityDetail').innerHTML=loadingBlock();api('getCustomer',id).then(renderCustomerDetail).catch(handleError); }
+  function renderCustomerDetail(c) { $('#entityDetail').innerHTML='<div class="entity-heading"><p class="eyebrow">CUSTOMER</p><h2 id="entityModalTitle">'+esc(c.FullName)+'</h2><p>'+esc(c.CustomerID)+'</p></div><section class="detail-section"><div class="info-grid"><div class="info-item"><span>Primary phone</span><strong>'+esc(c.PrimaryPhone)+'</strong></div><div class="info-item"><span>Secondary phone</span><strong>'+esc(c.SecondaryPhone||'—')+'</strong></div><div class="info-item"><span>Email</span><strong>'+esc(c.Email||'—')+'</strong></div><div class="info-item"><span>Address</span><strong>'+esc(c.Address||'—')+'</strong></div></div></section><section class="detail-section"><h3>Owned motorcycles</h3>'+(c.Motorcycles.length?'<div class="choice-grid">'+c.Motorcycles.map(function(m){return '<button class="choice-card" data-motorcycle-id="'+esc(m.MotorcycleID)+'"><strong>'+esc(m.Model)+'</strong><span>'+esc(m.PlateNumber||'No plate')+' · '+esc(m.VIN||'No VIN')+'</span></button>';}).join('')+'</div>':emptyState('No motorcycles','Motorcycles will appear here after they are added.'))+'</section><section class="detail-section"><h3>Repair history</h3>'+repairTable(c.Repairs,false)+'</section>'; }
+  function openMotorcycle(id) { showModal('entityModal');$('#entityDetail').innerHTML=loadingBlock();api('getMotorcycle',id).then(renderMotorcycleDetail).catch(handleError); }
+  function renderMotorcycleDetail(m) { $('#entityDetail').innerHTML='<div class="entity-heading"><p class="eyebrow">MOTORCYCLE</p><h2 id="entityModalTitle">'+esc(m.Model)+'</h2><p>'+esc(m.MotorcycleID)+'</p></div><section class="detail-section"><div class="info-grid"><div class="info-item"><span>Owner</span><strong>'+esc(m.Owner&&m.Owner.FullName)+'</strong></div><div class="info-item"><span>Owner phone</span><strong>'+esc(m.Owner&&m.Owner.PrimaryPhone)+'</strong></div><div class="info-item"><span>Model year</span><strong>'+esc(m.ModelYear||'—')+'</strong></div><div class="info-item"><span>Color</span><strong>'+esc(m.Color||'—')+'</strong></div><div class="info-item"><span>Plate number</span><strong>'+esc(m.PlateNumber||'—')+'</strong></div><div class="info-item"><span>VIN / chassis</span><strong>'+esc(m.VIN||'—')+'</strong></div><div class="info-item"><span>Engine number</span><strong>'+esc(m.EngineNumber||'—')+'</strong></div><div class="info-item"><span>Current mileage</span><strong>'+esc(m.Mileage===''?'—':money(m.Mileage)+' km')+'</strong></div></div></section><section class="detail-section"><h3>Complete repair history</h3>'+repairTable(m.Repairs,false)+'</section>'; }
+
+  function openCustomerForm() { $('#customerForm').reset();showModal('customerFormModal'); }
+  function submitCustomerForm(event) { event.preventDefault();var form=event.currentTarget;if(!form.reportValidity())return;var button=form.querySelector('[type=submit]');button.disabled=true;button.textContent='Saving…';api('createCustomer',Object.fromEntries(new FormData(form).entries())).then(function(){toast('Customer created.','success');closeModal();return refreshData();}).catch(handleError).finally(function(){button.disabled=false;button.textContent='Save Customer';}); }
+
+  function openGlobalSearch() { $('#globalSearch').classList.remove('hidden');$('#globalSearchInput').focus(); }
+  function closeGlobalSearch() { $('#globalSearch').classList.add('hidden');$('#globalSearchResults').innerHTML='';$('#globalSearchInput').value=''; }
+  function runGlobalSearch() { var q=$('#globalSearchInput').value.trim();if(q.length<2){$('#globalSearchResults').innerHTML=q?'<div class="empty">Type at least two characters.</div>':'';return;}$('#globalSearchResults').innerHTML=loadingBlock();api('globalSearch',q).then(renderGlobalResults).catch(handleError); }
+  function renderGlobalResults(results) { var groups=[['Repairs',results.repairs,'repair'],['Customers',results.customers,'customer'],['Motorcycles',results.motorcycles,'motorcycle']];var html=groups.map(function(g){if(!g[1].length)return '';return '<section class="search-group"><h3>'+g[0]+'</h3>'+g[1].map(function(item){var id=g[2]==='repair'?item.RepairID:g[2]==='customer'?item.CustomerID:item.MotorcycleID;var title=g[2]==='repair'?item.JobNumber:g[2]==='customer'?item.FullName:item.Model;var sub=g[2]==='repair'?item.CustomerName+' · '+item.MotorcycleModel:g[2]==='customer'?item.PrimaryPhone:(item.PlateNumber||'No plate')+' · '+item.OwnerName;return '<button class="search-result" data-search-type="'+g[2]+'" data-search-id="'+esc(id)+'"><strong>'+esc(title)+'</strong><span>'+esc(sub)+'</span></button>';}).join('')+'</section>';}).join('');$('#globalSearchResults').innerHTML=html||emptyState('No results','No customer, motorcycle, or repair matched your search.');$$('[data-search-id]',$('#globalSearchResults')).forEach(function(btn){btn.addEventListener('click',function(){closeGlobalSearch();if(this.dataset.searchType==='repair')openRepair(this.dataset.searchId);else if(this.dataset.searchType==='customer')openCustomer(this.dataset.searchId);else openMotorcycle(this.dataset.searchId);});}); }
+
+  function freshWizard() { return {step:0,customerMode:'new',customer:null,customerData:{},motorcycleMode:'new',motorcycle:null,motorcycleData:{},inspection:{Priority:'Normal'},repair:{}}; }
+  function openWizard() { state.wizard=freshWizard();showModal('wizardModal');renderWizard(); }
+  var stepNames=['Customer','Motorcycle','Initial Inspection','Repair Information','Review'];
+  function renderWizard() {
+    var w=state.wizard;$('#wizardSteps').innerHTML=stepNames.map(function(name,i){return '<div class="step '+(i===w.step?'active':i<w.step?'done':'')+'" data-number="'+(i+1)+'">'+esc(name)+'</div>';}).join('');
+    $('#wizardBack').style.visibility=w.step===0?'hidden':'visible';$('#wizardNext').textContent=w.step===4?'Create Repair':'Continue';
+    var renderers=[renderCustomerStep,renderMotorcycleStep,renderInspectionStep,renderRepairInfoStep,renderReviewStep];renderers[w.step]();
+  }
+
+  function renderCustomerStep() {
+    var w=state.wizard,d=w.customerData;$('#wizardSubtitle').textContent='Find an existing customer by phone or add a new one.';
+    $('#wizardBody').innerHTML='<div class="form-grid"><label class="full">Primary phone<div style="display:flex;gap:8px"><input name="PrimaryPhone" value="'+esc(d.PrimaryPhone||'')+'" required><button type="button" id="findCustomerBtn" class="button secondary compact">Find customer</button></div></label><div id="customerFound" class="full"></div><label>Full name<input name="FullName" value="'+esc(d.FullName||'')+'" required></label><label>Secondary phone<input name="SecondaryPhone" value="'+esc(d.SecondaryPhone||'')+'"></label><label>Email<input type="email" name="Email" value="'+esc(d.Email||'')+'"></label><label>Address<input name="Address" value="'+esc(d.Address||'')+'"></label><label class="full">Notes<textarea name="Notes" rows="2">'+esc(d.Notes||'')+'</textarea></label></div>';
+    if(w.customer) showFoundCustomer(w.customer);$('#findCustomerBtn').addEventListener('click',findWizardCustomer);
+  }
+  function findWizardCustomer() { var phone=$('#wizardBody [name=PrimaryPhone]').value.trim();if(!phone){toast('Enter a phone number first.','error');return;}$('#findCustomerBtn').disabled=true;api('findCustomerByPhone',phone).then(function(c){if(c){showFoundCustomer(c);}else{$('#customerFound').innerHTML='<div class="found-card"><span>No existing customer was found. Complete the fields below to create one.</span></div>';state.wizard.customer=null;state.wizard.customerMode='new';}}).catch(handleError).finally(function(){$('#findCustomerBtn').disabled=false;}); }
+  function showFoundCustomer(c) { $('#customerFound').innerHTML='<div class="found-card"><span class="found-label">Customer found</span><div class="found-row"><div><strong>'+esc(c.FullName)+'</strong><span>'+esc(c.PrimaryPhone)+' · '+esc(c.RepairCount||0)+' previous repairs</span></div><button type="button" id="useCustomerBtn" class="button secondary compact">Use Customer</button></div></div>';$('#useCustomerBtn').addEventListener('click',function(){state.wizard.customer=c;state.wizard.customerMode='existing';var body=$('#wizardBody');body.querySelector('[name=FullName]').value=c.FullName||'';body.querySelector('[name=PrimaryPhone]').value=c.PrimaryPhone||'';body.querySelector('[name=SecondaryPhone]').value=c.SecondaryPhone||'';body.querySelector('[name=Email]').value=c.Email||'';body.querySelector('[name=Address]').value=c.Address||'';toast('Existing customer selected.','success');}); }
+
+  function renderMotorcycleStep() { var w=state.wizard,d=w.motorcycleData;$('#wizardSubtitle').textContent='Choose one of this customer’s motorcycles or add a new one.';var existing=w.customer&&w.customer.Motorcycles?w.customer.Motorcycles:[];$('#wizardBody').innerHTML=(existing.length?'<div class="choice-grid">'+existing.map(function(m){return '<button type="button" class="choice-card '+(w.motorcycle&&w.motorcycle.MotorcycleID===m.MotorcycleID?'selected':'')+'" data-wizard-moto="'+esc(m.MotorcycleID)+'"><strong>'+esc(m.Model)+'</strong><span>'+esc(m.PlateNumber||'No plate')+' · '+esc(m.VIN||'No VIN')+'</span></button>';}).join('')+'<button type="button" class="choice-card '+(w.motorcycleMode==='new'?'selected':'')+'" id="addNewMoto"><strong>+ Add New Motorcycle</strong><span>Create a motorcycle for this customer</span></button></div><div style="height:18px"></div>':'')+'<div id="newMotoFields" class="form-grid '+(existing.length&&w.motorcycleMode!=='new'?'hidden':'')+'"><label>Model<input name="Model" value="'+esc(d.Model||'')+'" required></label><label>Model year<input name="ModelYear" type="number" min="1900" max="2100" value="'+esc(d.ModelYear||'')+'"></label><label>Plate number<input name="PlateNumber" value="'+esc(d.PlateNumber||'')+'"></label><label>VIN / Chassis number<input name="VIN" value="'+esc(d.VIN||'')+'"></label><label>Engine number<input name="EngineNumber" value="'+esc(d.EngineNumber||'')+'"></label><label>Color<input name="Color" value="'+esc(d.Color||'')+'"></label><label>Current mileage<input name="Mileage" type="number" min="0" value="'+esc(d.Mileage||'')+'"></label><label>Notes<input name="Notes" value="'+esc(d.Notes||'')+'"></label></div>';
+    $$('[data-wizard-moto]',$('#wizardBody')).forEach(function(btn){btn.addEventListener('click',function(){var id=this.dataset.wizardMoto;state.wizard.motorcycle=existing.filter(function(m){return m.MotorcycleID===id;})[0];state.wizard.motorcycleMode='existing';renderMotorcycleStep();});});var add=$('#addNewMoto');if(add)add.addEventListener('click',function(){state.wizard.motorcycle=null;state.wizard.motorcycleMode='new';renderMotorcycleStep();}); }
+
+  function renderInspectionStep() { var d=state.wizard.inspection;$('#wizardSubtitle').textContent='Capture the condition and what the customer reported.';$('#wizardBody').innerHTML='<div class="form-grid"><label class="full">Customer complaint<textarea name="CustomerComplaint" rows="3" required>'+esc(d.CustomerComplaint||'')+'</textarea></label><label class="full">Initial inspection / Technician findings<textarea name="InitialInspection" rows="3">'+esc(d.InitialInspection||'')+'</textarea></label><label>Current mileage<input name="Mileage" type="number" min="0" value="'+esc(d.Mileage||state.wizard.motorcycleData.Mileage||'')+'"></label><label>Priority<select name="Priority">'+state.priorities.map(function(p){return '<option '+(d.Priority===p?'selected':'')+'>'+esc(p)+'</option>';}).join('')+'</select></label><label>Assigned specialist<input name="AssignedSpecialist" value="'+esc(d.AssignedSpecialist||'')+'" required></label><label>Estimated completion<input name="EstimatedCompletion" type="datetime-local" value="'+esc(d.EstimatedCompletion||'')+'"></label><label class="full">Internal notes<textarea name="InternalNotes" rows="2">'+esc(d.InternalNotes||'')+'</textarea></label></div>'; }
+  function renderRepairInfoStep() { var d=state.wizard.repair;$('#wizardSubtitle').textContent='Add diagnosis, approvals, and early cost expectations.';$('#wizardBody').innerHTML='<div class="form-grid"><label class="full">Diagnosis<textarea name="Diagnosis" rows="4">'+esc(d.Diagnosis||'')+'</textarea></label><label>Starting status<select name="Status">'+state.statuses.map(function(s){return '<option '+((d.Status||'Received')===s?'selected':'')+'>'+esc(s)+'</option>';}).join('')+'</select></label><label>Customer approval<select name="CustomerApproval"><option value="">Pending</option><option '+(d.CustomerApproval==='Approved'?'selected':'')+'>Approved</option><option '+(d.CustomerApproval==='Declined'?'selected':'')+'>Declined</option></select></label><label>Estimated cost<input name="EstimatedCost" type="number" min="0" step="0.01" value="'+esc(d.EstimatedCost||'')+'"></label><label>Approved cost<input name="ApprovedCost" type="number" min="0" step="0.01" value="'+esc(d.ApprovedCost||'')+'"></label></div>'; }
+  function renderReviewStep() { var w=state.wizard,c=w.customer||w.customerData,m=w.motorcycle||w.motorcycleData,i=w.inspection,r=w.repair;$('#wizardSubtitle').textContent='Review the service order before creating it.';$('#wizardBody').innerHTML='<div class="review-grid"><article class="review-card"><h3>Customer</h3><p><strong>'+esc(c.FullName)+'</strong></p><p>'+esc(c.PrimaryPhone)+'</p><p>'+esc(c.Email||'No email')+'</p></article><article class="review-card"><h3>Motorcycle</h3><p><strong>'+esc(m.Model)+'</strong></p><p>'+esc(m.PlateNumber||'No plate')+' · '+esc(m.VIN||'No VIN')+'</p><p>'+esc(i.Mileage||m.Mileage||'—')+' km</p></article><article class="review-card"><h3>Inspection</h3><p><strong>'+esc(i.Priority)+' priority</strong></p><p>'+esc(i.CustomerComplaint)+'</p><p>Specialist: '+esc(i.AssignedSpecialist)+'</p></article><article class="review-card"><h3>Repair information</h3><p><strong>'+esc(r.Status||'Received')+'</strong></p><p>Estimated cost: '+money(r.EstimatedCost)+'</p><p>Completion: '+fmtDate(i.EstimatedCompletion,true)+'</p></article></div>'; }
+
+  function captureStep() { var w=state.wizard,body=$('#wizardBody'),inputs=$$('input,select,textarea',body);var invalid=inputs.filter(function(el){return !el.checkValidity()&&!el.closest('.hidden');})[0];if(invalid){invalid.reportValidity();return false;}var data={};inputs.forEach(function(el){if(!el.closest('.hidden'))data[el.name]=el.value;});if(w.step===0){w.customerData=data;if(w.customerMode==='existing'&&w.customer){}else{w.customer=null;w.customerMode='new';}}else if(w.step===1){if(w.motorcycleMode==='new')w.motorcycleData=data;}else if(w.step===2)w.inspection=data;else if(w.step===3)w.repair=data;return true; }
+  function wizardBack() { if(state.wizard.step>0){state.wizard.step--;renderWizard();} }
+  function wizardNext() { var w=state.wizard;if(!captureStep())return;if(w.step===0&&w.customerMode==='existing'&&w.customer){api('getCustomer',w.customer.CustomerID).then(function(c){w.customer=c;w.step++;renderWizard();}).catch(handleError);return;}if(w.step===1&&w.motorcycleMode==='existing'&&!w.motorcycle){toast('Choose a motorcycle or add a new one.','error');return;}if(w.step<4){w.step++;renderWizard();return;}submitWizard(); }
+  function submitWizard() { var w=state.wizard,button=$('#wizardNext');button.disabled=true;button.textContent='Creating…';var customerPromise=w.customerMode==='existing'?Promise.resolve(w.customer):api('createCustomer',w.customerData);customerPromise.then(function(customer){w.customer=customer;if(w.motorcycleMode==='existing')return w.motorcycle;var moto=Object.assign({},w.motorcycleData,{CustomerID:customer.CustomerID});return api('createMotorcycle',moto);}).then(function(motorcycle){w.motorcycle=motorcycle;var payload=Object.assign({},w.inspection,w.repair,{CustomerID:w.customer.CustomerID,MotorcycleID:motorcycle.MotorcycleID});return api('createRepairOrder',payload);}).then(function(repair){toast('Repair '+repair.JobNumber+' created.','success');closeModal();return refreshData().then(function(){navigate('repairs');openRepair(repair.RepairID);});}).catch(handleError).finally(function(){button.disabled=false;button.textContent='Create Repair';}); }
+
+  function refreshData() { return api('getBootstrapData').then(function(data){state.dashboard=data.dashboard;state.repairs=data.repairs;state.customers=data.customers;state.motorcycles=data.motorcycles;state.statuses=data.statuses;state.priorities=data.priorities;populateFilters();renderAll();}); }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded',init);
+  else init();
+})();
+</script>

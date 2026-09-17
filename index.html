@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>Zontes Garage</title>
+  <!-- Load the standalone stylesheet only outside Apps Script. -->
+  <script>
+    if (!(window.google && google.script && google.script.run)) {
+      document.write('<link rel="stylesheet" href="style.css">');
+    }
+  </script>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <div id="appLoading" class="app-loading" role="status"><span class="spinner"></span><span>Opening the garage…</span></div>
+
+  <header class="topbar">
+    <div class="nav-wrap">
+      <button class="brand" data-nav="dashboard" aria-label="Zontes Garage home">
+        <span class="brand-mark">ZG</span><span>Zontes Garage</span>
+      </button>
+      <nav class="main-nav" aria-label="Primary navigation">
+        <button class="nav-link active" data-nav="dashboard">Dashboard</button>
+        <button class="nav-link" data-nav="repairs">Repairs</button>
+        <button class="nav-link" data-nav="customers">Customers</button>
+        <button class="nav-link" data-nav="motorcycles">Motorcycles</button>
+      </nav>
+      <div class="nav-actions">
+        <button id="searchToggle" class="icon-button" aria-label="Search"><span>⌕</span><span class="desktop-only">Search</span></button>
+        <button class="button primary compact" data-new-repair>+ New Repair</button>
+        <button class="avatar" title="Garage user" aria-label="Garage user">GS</button>
+        <button id="menuToggle" class="icon-button mobile-only" aria-label="Open menu">☰</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="globalSearch" class="search-panel hidden">
+    <div class="search-box"><span>⌕</span><input id="globalSearchInput" type="search" placeholder="Search jobs, customers, phones, plates, VINs…" autocomplete="off"><button id="searchClose" aria-label="Close search">×</button></div>
+    <div id="globalSearchResults" class="search-results"></div>
+  </div>
+
+  <main class="page-shell">
+    <section id="page-dashboard" class="page active">
+      <div class="page-heading hero-heading">
+        <div><p class="eyebrow">WORKSHOP OVERVIEW</p><h1>Service operations.</h1><p>Everything happening in the garage today.</p></div>
+        <button class="button primary" data-new-repair>+ New Repair</button>
+      </div>
+      <div id="metricGrid" class="metric-grid"></div>
+      <div class="content-grid">
+        <section class="surface span-2"><div class="section-head"><div><h2>Recent Repairs</h2><p>The latest activity across your workshop.</p></div><button class="text-button" data-nav="repairs">View all</button></div><div id="recentRepairs"></div></section>
+        <section class="surface attention-card"><div class="section-head"><div><h2>Needs Attention</h2><p>Items that may block delivery.</p></div></div><div id="attentionList" class="attention-list"></div></section>
+      </div>
+    </section>
+
+    <section id="page-repairs" class="page">
+      <div class="page-heading"><div><p class="eyebrow">SERVICE ORDERS</p><h1>Repairs</h1><p>Track every motorcycle from check-in to handover.</p></div><button class="button primary" data-new-repair>+ New Repair</button></div>
+      <section class="surface"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="repairSearch" type="search" placeholder="Search job, customer, phone, model, plate or VIN"></label><select id="statusFilter" aria-label="Filter by status"><option value="">All statuses</option></select><select id="specialistFilter" aria-label="Filter by specialist"><option value="">All specialists</option></select><select id="priorityFilter" aria-label="Filter by priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="dateFilter" type="date" aria-label="Filter by check-in date"><button id="clearFilters" class="button secondary compact">Clear</button></div><div id="repairsTable"></div></section>
+    </section>
+
+    <section id="page-customers" class="page">
+      <div class="page-heading"><div><p class="eyebrow">RELATIONSHIPS</p><h1>Customers</h1><p>Contact details, motorcycles, and complete service history.</p></div><button id="newCustomerBtn" class="button secondary">+ New Customer</button></div>
+      <section class="surface"><label class="search-field wide"><span>⌕</span><input id="customerSearch" type="search" placeholder="Search customer, phone or email"></label><div id="customersTable"></div></section>
+    </section>
+
+    <section id="page-motorcycles" class="page">
+      <div class="page-heading"><div><p class="eyebrow">VEHICLES</p><h1>Motorcycles</h1><p>Every bike, its owner, mileage, and repair history.</p></div></div>
+      <section class="surface"><label class="search-field wide"><span>⌕</span><input id="motorcycleSearch" type="search" placeholder="Search model, plate, VIN or owner"></label><div id="motorcyclesTable"></div></section>
+    </section>
+  </main>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden" aria-hidden="true">
+    <section id="repairModal" class="modal modal-large hidden" role="dialog" aria-modal="true" aria-labelledby="repairModalTitle">
+      <button class="modal-close" data-close-modal aria-label="Close">×</button><div id="repairDetail"></div>
+    </section>
+
+    <section id="entityModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="entityModalTitle">
+      <button class="modal-close" data-close-modal aria-label="Close">×</button><div id="entityDetail"></div>
+    </section>
+
+    <section id="wizardModal" class="modal modal-large hidden" role="dialog" aria-modal="true" aria-labelledby="wizardTitle">
+      <button class="modal-close" data-close-modal aria-label="Close">×</button>
+      <div class="modal-heading"><p class="eyebrow">NEW SERVICE ORDER</p><h2 id="wizardTitle">Create a repair</h2><p id="wizardSubtitle">Start with the customer bringing in the motorcycle.</p></div>
+      <div id="wizardSteps" class="stepper"></div>
+      <form id="repairWizard" novalidate><div id="wizardBody"></div><div class="wizard-actions"><button type="button" id="wizardBack" class="button secondary">Back</button><button type="button" id="wizardNext" class="button primary">Continue</button></div></form>
+    </section>
+
+    <section id="updateModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="updateTitle">
+      <button class="modal-close" data-close-modal aria-label="Close">×</button><div class="modal-heading"><p class="eyebrow">REPAIR HISTORY</p><h2 id="updateTitle">Add an update</h2><p>Record work without changing earlier history.</p></div>
+      <form id="updateForm" class="form-grid" novalidate>
+        <label class="full">Stage<select name="Stage" required></select></label><label class="full">Work performed<textarea name="WorkPerformed" rows="3" required></textarea></label><label class="full">Finding<textarea name="Finding" rows="2"></textarea></label><label>Labor hours<input name="LaborHours" type="number" min="0" step="0.25"></label><label>Specialist<input name="Specialist" required></label><label class="full">Technician notes<textarea name="Notes" rows="2"></textarea></label><label class="full">Next action<input name="NextAction"></label>
+        <div class="full subform"><div class="subform-title"><strong>Part used</strong><span>Optional</span></div><div class="form-grid"><label>Part name<input name="PartName"></label><label>Part number<input name="PartNumber"></label><label>Quantity<input name="PartQuantity" type="number" min="0" step="1"></label><label>Unit price<input name="PartUnitPrice" type="number" min="0" step="0.01"></label></div></div>
+        <div class="full form-actions"><button type="button" class="button secondary" data-close-modal>Cancel</button><button type="submit" class="button primary">Save Update</button></div>
+      </form>
+    </section>
+
+    <section id="customerFormModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="customerFormTitle">
+      <button class="modal-close" data-close-modal aria-label="Close">×</button><div class="modal-heading"><p class="eyebrow">CUSTOMER RECORD</p><h2 id="customerFormTitle">New customer</h2></div>
+      <form id="customerForm" class="form-grid" novalidate><label>Full name<input name="FullName" required></label><label>Primary phone<input name="PrimaryPhone" required></label><label>Secondary phone<input name="SecondaryPhone"></label><label>Email<input name="Email" type="email"></label><label class="full">Address<input name="Address"></label><label class="full">Notes<textarea name="Notes" rows="3"></textarea></label><div class="full form-actions"><button type="button" class="button secondary" data-close-modal>Cancel</button><button class="button primary" type="submit">Save Customer</button></div></form>
+    </section>
+  </div>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+  <!-- app.js is a local preview bridge; Apps Script injects Scripts.html below. -->
+  <script>
+    if (!(window.google && google.script && google.script.run)) {
+      var localPreviewScript = document.createElement('script');
+      localPreviewScript.src = 'app.js';
+      document.body.appendChild(localPreviewScript);
+    }
+  </script>
+  <?!= include('Scripts'); ?>
+</body>
+</html>
