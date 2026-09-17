@@ -7,6 +7,17 @@ var SHEETS = {
   Settings: ['Key','Value']
 };
 
+// Google Sheets can coerce phone numbers and identifiers into numbers. Keeping
+// these fields as plain text preserves leading zeroes and long VIN/part values.
+var TEXT_COLUMNS = {
+  Customers: ['CustomerID','FullName','PrimaryPhone','SecondaryPhone','Email','Address','Notes'],
+  Motorcycles: ['MotorcycleID','CustomerID','Model','ModelYear','PlateNumber','VIN','EngineNumber','Color','Notes'],
+  RepairOrders: ['RepairID','JobNumber','CustomerID','MotorcycleID','CustomerComplaint','InitialInspection','Diagnosis','AssignedSpecialist','Priority','Status','CustomerApproval','InternalNotes'],
+  RepairLogs: ['LogID','RepairID','Specialist','Stage','WorkPerformed','Finding','PartsUsed','Notes','NextAction'],
+  Parts: ['PartUsageID','RepairID','PartName','PartNumber','InstalledBy'],
+  Settings: ['Key','Value']
+};
+
 var REPAIR_STATUSES = ['Received','Initial Inspection','Diagnosis','Waiting for Customer Approval','Approved','Repair in Progress','Waiting for Parts','Quality Check','Ready for Pickup','Delivered','Cancelled'];
 var REPAIR_PRIORITIES = ['Normal','High','Urgent'];
 var ScriptProperties = PropertiesService.getScriptProperties();
@@ -35,6 +46,7 @@ function setupDatabase() {
     }
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#f4f8fb');
+    applySheetTextFormats_(sheet, name);
   });
   var settings = ss.getSheetByName('Settings');
   if (settings.getLastRow() === 1) settings.appendRow(['GarageName', 'Zontes Garage']);
@@ -62,7 +74,9 @@ function readSheet_(name) {
 function appendRecord_(name, record) {
   var sheet = getSpreadsheet_().getSheetByName(name);
   var row = SHEETS[name].map(function(key) { return record[key] === undefined ? '' : record[key]; });
-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  var range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length);
+  applyRowTextFormats_(range, name);
+  range.setValues([row]);
   return record;
 }
 
@@ -72,9 +86,30 @@ function updateRecord_(name, idField, id, changes) {
   if (!record) throw new Error(name.replace(/s$/, '') + ' not found.');
   var merged = {};
   SHEETS[name].forEach(function(key) { merged[key] = changes[key] !== undefined ? changes[key] : record[key]; });
-  getSpreadsheet_().getSheetByName(name).getRange(record._row, 1, 1, SHEETS[name].length)
-    .setValues([SHEETS[name].map(function(key) { return merged[key]; })]);
+  var range = getSpreadsheet_().getSheetByName(name).getRange(record._row, 1, 1, SHEETS[name].length);
+  applyRowTextFormats_(range, name);
+  range.setValues([SHEETS[name].map(function(key) { return merged[key]; })]);
   return merged;
+}
+
+function applySheetTextFormats_(sheet, name) {
+  var headers = SHEETS[name];
+  (TEXT_COLUMNS[name] || []).forEach(function(key) {
+    var column = headers.indexOf(key) + 1;
+    if (column > 0 && sheet.getMaxRows() > 1) {
+      sheet.getRange(2, column, sheet.getMaxRows() - 1, 1).setNumberFormat('@');
+    }
+  });
+}
+
+function applyRowTextFormats_(range, name) {
+  var textColumns = TEXT_COLUMNS[name] || [];
+  if (!textColumns.length) return;
+  var formats = range.getNumberFormats();
+  SHEETS[name].forEach(function(key, index) {
+    if (textColumns.indexOf(key) !== -1) formats[0][index] = '@';
+  });
+  range.setNumberFormats(formats);
 }
 
 function findRecord_(name, field, value) {
